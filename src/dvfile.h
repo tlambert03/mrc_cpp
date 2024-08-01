@@ -99,6 +99,18 @@ class DVFile {
   IW_MRC_Header hdr;
   bool closed = true;
 
+  void _validateZWT(int z, int w, int t) {
+    if (t >= hdr.num_times) {
+      throw std::runtime_error("Time index out of range");
+    }
+    if (w >= hdr.num_waves) {
+      throw std::runtime_error("Wavelength index out of range");
+    }
+    if (z >= hdr.num_planes()) {
+      throw std::runtime_error("Section index out of range");
+    }
+  }
+
  public:
   DVFile(const std::string& path) {
     _path = path;
@@ -123,39 +135,32 @@ class DVFile {
     _file->seekg(0);
     _file->read(reinterpret_cast<char*>(&hdr), sizeof(IW_MRC_Header));
     closed = false;
-
-    hdr.print();
   }
 
-  void readSec(void* array, int t = 0, int c = 0, int z = 0) {
-    if (closed) {
-      throw std::runtime_error("Cannot read from closed file. Please reopen with .open()");
-    }
+  // this is only here for the IVE API
+  void setCurrentZWT(int z, int w, int t) {
+    _validateZWT(z, w, t);
 
     size_t frame_size = hdr.ny * hdr.nx * getPixelSize();
     int header_size = 1024 + hdr.inbsym;
-    int section_offset = calculateOffset(t, c, z);
+    int section_offset = (t * hdr.num_waves * hdr.num_planes() + w * hdr.num_planes() + z);
     _file->seekg(header_size + section_offset * frame_size);
+  }
+
+  void readSec(void* array) {
+    if (closed) {
+      throw std::runtime_error("Cannot read from closed file. Please reopen with .open()");
+    }
+    size_t frame_size = hdr.ny * hdr.nx * getPixelSize();
     _file->read(reinterpret_cast<char*>(array), frame_size);
   }
 
-  size_t getPixelSize() { return getPixelTypeSize(static_cast<PixelType>(hdr.mode)); }
-
-  int calculateOffset(int t, int c, int z) {
-    // determine offset given data order of TCZYX
-    if (t >= hdr.num_times) {
-      throw std::runtime_error("Time index out of range");
-    }
-    if (c >= hdr.num_waves) {
-      throw std::runtime_error("Wavelength index out of range");
-    }
-    int num_real_z =
-        hdr.nz / (hdr.num_waves ? hdr.num_waves : 1) / (hdr.num_times ? hdr.num_times : 1);
-    if (z >= num_real_z) {
-      throw std::runtime_error("Section index out of range");
-    }
-    return (t * hdr.num_waves * num_real_z + c * num_real_z + z);
+  void readSec(void* array, int t, int w, int z) {
+    setCurrentZWT(z, w, t);
+    readSec(array);
   }
+
+  size_t getPixelSize() { return getPixelTypeSize(static_cast<PixelType>(hdr.mode)); }
 
   void open() {
     if (closed) {
@@ -262,14 +267,123 @@ void IMRdHdr(int istream, int ixyz[3], int mxyz[3], int* imode, float* min, floa
   *mean = header.amean;
 }
 
+/**
+ * @brief Set the image conversion mode during read/write operations from image storage.
+ *
+ * By default in IVE, images that are read from image storage are converted to
+ * 4-byte floating-point data. Similarly, when images are written to image
+ * storage they are converted to the data type indicated by the image data type
+ * associated with the corresponding stream (see IMAlMode). The default in IVE
+ * is ConversionFlag=TRUE.
+ * We, however, don't ever convert the data type of the image data. So for now,
+ * this is a no-op.
+ *
+ * @param istream The input stream to be used for the operation.
+ * @param flag The flag indicating the type of operation to be performed.
+ */
+void IMAlCon(int istream, int flag) {
+  // if flag is 1, warn:
+  if (flag == 1) {
+    std::cerr << "Warning: IMAlCon is not implemented. ConversionFlag=TRUE is not supported."
+              << std::endl;
+  }
+}
+
+/**
+ * @brief Change the image titles.
+ *
+ * @param istream The input stream to be used for the operation.
+ * @param titles The titles to be changed.  Contains at least NumTitles title strings, each of
+ * which must contain exactly 80 characters.
+ * @param num_titles The number of titles to be changed.
+ */
+void IMAlLab(int istream, const char* labels, int nl) {
+  std::cerr << "Warning: IMAlLab is not implemented." << std::endl;
+}
+
+/**
+ * @brief  Enable or disable printing to standard output ("stdout").
+ *
+ * Certain IM functions will print information to stdout if Format=TRUE, which is the default. To
+ * disable printing, set flag=FALSE.
+ *
+ * @param flag The flag indicating the type of operation to be performed.
+ */
+void IMAlPrt(int flag) {
+  if (flag == 1) {
+    std::cerr << "Warning: IMAlPrt is not implemented." << std::endl;
+  }
+}
+
+/**
+ * @brief Position the read/write point at a particular Z, W, T section.
+ *
+ * If the stream points to a scratch window, IMPosnZWT can only change the destination wavelength.
+ *
+ * @param istream The input stream to be used for the operation.
+ * @param iz The Z section number.
+ * @param iw The wavelength number.
+ * @param it The time-point number.
+ * @return int 0 if successful and 1 if not.
+ */
+int IMPosnZWT(int istream, int iz, int iw, int it) {
+  DVFile& dvfile = getDVFile(istream);
+
+  try {
+    dvfile.setCurrentZWT(iz, iw, it);
+    return 0;
+  } catch (const std::exception& e) {
+    std::cerr << e.what() << '\n';
+    return 1;
+  }
+}
+
+/**
+ * @brief Read the next section.
+ *
+ * Reads the next section into ImgBuffer and advances the file pointer to the
+ * section after that. The results are undefined if ImgBuffer does not have at
+ * least nx * ny elements or the file pointer does not point to the beginning of
+ * a section.
+ * In most cases, ImgBuffer will contain floating-point data. When
+ * image conversion is off, however, the data type of ImgBuffer should
+ * correspond to whatever data type is actually stored. For example, if the
+ * image data are stored as 16-bit integers, then ImgBuffer should point to a
+ * 16-bit buffer. See IMAlCon.
+ *
+ * @param istream The input stream to be used for the operation.
+ * @param ImgBuffer The image buffer to store the data.
+ */
+void IMRdSec(int istream, void* ImgBuffer) {
+  try {
+    getDVFile(istream).readSec(ImgBuffer);
+  } catch (const std::runtime_error& e) {
+    std::cerr << "Error reading section: " << e.what() << std::endl;
+    // Handle the error appropriately, e.g., by rethrowing or returning an error code
+    throw;  // Rethrow the exception to propagate it further
+  }
+}
+
+void IMPutHdr(int istream, const IW_MRC_HEADER* header) {
+  std::cerr << "Warning: IMPutHdr is not implemented." << std::endl;
+}
 // not yet implemented ///////////////////////////////////
 
-void IMAlCon(int istream, int flag);
-void IMAlLab(int istream, const char* labels, int nl);
-void IMAlPrt(int flag);
-int IMPosnZWT(int istream, int iz, int iw, int it);
-void IMPutHdr(int istream, const void* header);  // header is a pointer to IW_MRC_HEADER
-void IMRdSec(int istream, void* array);
-void IMRtExHdrZWT(int istream, int iz, int iw, int it, int ival[], float rval[]);
-void IMWrHdr(int istream, const char title[80], int ntflag, float dmin, float dmax, float dmean);
-void IMWrSec(int istream, const void* array);
+/**
+ * @brief Return extended header values for a particular Z section, wavelength,
+ * and time-point.
+ *
+ * The integer and floating-point values for the requested Z section (ZSecNum),
+ * wavelength (WaveNum), and time-point (TimeNum) are returned in IntValues and
+ * FloatValues, respectively.
+ *
+ */
+void IMRtExHdrZWT(int istream, int iz, int iw, int it, int ival[], float rval[]) {
+  std::cerr << "Warning: IMRtExHdrZWT is not implemented." << std::endl;
+}
+void IMWrHdr(int istream, const char title[80], int ntflag, float dmin, float dmax, float dmean) {
+  std::cerr << "Warning: IMWrHdr is not implemented." << std::endl;
+}
+void IMWrSec(int istream, const void* array) {
+  std::cerr << "Warning: IMWrSec is not implemented." << std::endl;
+}
