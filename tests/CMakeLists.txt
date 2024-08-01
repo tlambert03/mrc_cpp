@@ -22,3 +22,4 @@ add_custom_command(TARGET test_dvfile POST_BUILD
 
 # Add tests
 add_test(NAME DVFileTest COMMAND test_dvfile)
+set_tests_properties(DVFileTest PROPERTIES WORKING_DIRECTORY $<TARGET_FILE_DIR:test_dvfile>)

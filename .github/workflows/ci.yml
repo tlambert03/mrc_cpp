@@ -22,5 +22,5 @@ jobs:
           mkdir -p build
           cd build
           cmake ..
-          cmake --build .
+          cmake --build . --config Debug
           ctest -C Debug --output-on-failure
